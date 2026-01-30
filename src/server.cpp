@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <netinet/in.h>
 
@@ -17,12 +18,10 @@
 #include <sys/types.h>
 #include <thread>
 #include <time.h>
-#include <tuple>
+
 #include <unistd.h>
-#include <unordered_map>
 
 #include <format>
-#include <utility>
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -61,7 +60,8 @@ struct Stats {
 } stats;
 
 // Globals
-std::unordered_map<int, ClientInfo> clients;
+// std::unordered_map<int, ClientInfo> clients;
+std::vector<std::unique_ptr<ClientInfo>> clients;
 std::mutex clients_mutex;
 
 int make_socket_non_block(int fd) {
@@ -73,10 +73,14 @@ int make_socket_non_block(int fd) {
 }
 
 void remove_client_locked(int epoll_fd, int client_fd) {
-  epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
-  close(client_fd);
-  clients.erase(client_fd);
-  stats.active_clients--;
+  if (client_fd >= 0 && client_fd < (int)clients.size() && clients[client_fd]) {
+
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+    close(client_fd);
+
+    clients[client_fd].reset();
+    stats.active_clients--;
+  }
 }
 
 void remove_client(int epoll_fd, int client_fd) {
@@ -87,9 +91,12 @@ void remove_client(int epoll_fd, int client_fd) {
 void process_client_messages(int epoll_fd, ClientInfo &cl) {
   int count = 0;
   while (count <= MAX_ITERATION_CLIENT) {
+
+    // wait header
     if (!cl.header_recived) {
       if (cl.recived < sizeof(MessageHeader))
         break;
+
       memcpy(&cl.header, cl.buff, sizeof(MessageHeader));
       cl.header_recived = true;
     }
@@ -123,11 +130,10 @@ void process_client_messages(int epoll_fd, ClientInfo &cl) {
 void handle_client_data(int epoll_fd, int fd, TimePoint now) {
   std::lock_guard<std::mutex> lock(clients_mutex);
 
-  auto it = clients.find(fd);
-  if (it == clients.end())
+  if (fd >= (int)clients.size() || !clients[fd])
     return;
 
-  ClientInfo &cl = it->second;
+  ClientInfo &cl = *clients[fd];
   cl.last_activ = now;
 
   // В режиме EPOLLET нужно читать до EAGAIN
@@ -161,7 +167,8 @@ void handle_client_data(int epoll_fd, int fd, TimePoint now) {
   }
 }
 void handle_new_conn(int epoll_fd, int listen_sock) {
-  while (true) {
+  int count = 0;
+  while (count <= MAX_ITERATION_SERVER_ACCEPT) {
     struct sockaddr_in addr;
     socklen_t len = sizeof(addr);
     int client_fd = accept(listen_sock, (struct sockaddr *)&addr, &len);
@@ -177,20 +184,23 @@ void handle_new_conn(int epoll_fd, int listen_sock) {
       continue;
     }
 
+    {
+      std::lock_guard<std::mutex> lock(clients_mutex);
+      if (client_fd >= (int)clients.size()) {
+        clients.resize(client_fd + 128);
+      }
+      clients[client_fd] = std::make_unique<ClientInfo>(client_fd);
+      stats.active_clients++;
+    }
+
     make_socket_non_block(client_fd);
     epoll_event ev;
     ev.events = EPOLLIN || EPOLLET;
     ev.data.fd = client_fd;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
 
-    {
-      std::lock_guard<std::mutex> lock(clients_mutex);
-      clients.emplace(std::piecewise_construct,
-                      std::forward_as_tuple(client_fd),
-                      std::forward_as_tuple(client_fd));
-      stats.active_clients++;
-    }
-    std::cout << "New Client... " << client_fd << std::endl;
+    std::cout << "New Client: " << client_fd << std::endl;
+    count += 1;
   }
 }
 
@@ -202,9 +212,11 @@ void cleaner_thread(int epoll_fd) {
 
     {
       std::lock_guard<std::mutex> lock(clients_mutex);
-      for (auto const &[fd, cl] : clients) {
-        if (now - cl.last_activ > std::chrono::seconds(30)) {
-          to_remove.push_back(fd);
+      for (int i = 0; i < (int)clients.size(); ++i) {
+
+        if (clients[i] &&
+            (now - clients[i]->last_activ > std::chrono::seconds(30))) {
+          to_remove.push_back(i);
         }
       }
     }
@@ -280,6 +292,7 @@ int main(int argc, char **argv) {
   epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &ev);
 
   std::thread cleaner(cleaner_thread, epoll_fd);
+  clients.resize(1024);
 
   std::cout << "Server listening on port " << port << std::endl;
   epoll_event events[MAX_EVENTS];
@@ -303,8 +316,14 @@ int main(int argc, char **argv) {
   server_running = false;
   cleaner.join();
 
-  for (auto &[fd, _] : clients) {
-    close(fd);
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex);
+    for (int i = 0; i < (int)clients.size(); ++i) {
+      if (clients[i]) {
+        close(i);
+        clients[i].reset();
+      }
+    }
   }
 
   close(sock);
