@@ -4,7 +4,7 @@
 ### Основные технологии:
 *   **Язык:** C++20.
 *   **I/O Multiplexing:** `epoll` (Linux-specific).
-*   **Модель обработки:** Single-threaded Event Loop.
+*   **Модель обработки:** multi-threaded Event Loop.
 *   **Режим работы сокетов:** Non-blocking + Edge Triggered (ET).
 
 ---
@@ -25,8 +25,14 @@
 ```text
 .
 ├── CMakeLists.txt        # Файл конфигурации сборки
+├── metric
+│   ├── otchet.md         # Собранные метрики
+│   ├── report.md         # Оформленные метрики для сравнеения и принятия решений
 ├── src
 │   ├── server.cpp        # код сервера
+│   ├── server_prev.cpp   # Код первой версии для сравнения 
+│   ├── logger.cpp        # логирование в файл
+│   ├-- perf_mon.cpp      # Код мониторинга и метрик 
 │   └── client.cpp        # код клиента
 └── README.md             # Текущая инструкция
 ```
