@@ -1,8 +1,10 @@
 #include <arpa/inet.h>
 #include <asm-generic/socket.h>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -12,21 +14,23 @@
 #include <memory>
 #include <mutex>
 #include <netinet/in.h>
-
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <thread>
 #include <time.h>
 
+#include "logger.cpp"
+#include "perf_mon.cpp"
 #include <unistd.h>
 
-#include <format>
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = std::chrono::time_point<Clock>;
 
 std::atomic<bool> server_running{true};
+PerformanceMonitor pm;
+AsyncLogger logger("metrics/server_perf.csv");
 
 // Perfomance Parameters
 const int MAX_ITERATION_SERVER_ACCEPT = 64;
@@ -43,21 +47,16 @@ struct MessageHeader {
 
 struct ClientInfo {
   int fd;
+  TimePoint connect_time;
   TimePoint last_activ;
   char buff[BUF_SIZE];
   size_t recived = 0;
   bool header_recived = false;
   MessageHeader header;
 
-  ClientInfo(int f) : fd(f), last_activ(Clock::now()) {}
+  ClientInfo(int f)
+      : fd(f), last_activ(Clock::now()), connect_time(Clock::now()) {}
 };
-
-struct Stats {
-  std::atomic<int> active_clients{0};
-  std::atomic<int> total_received{0};
-  std::atomic<int> total_sent{0};
-  std::atomic<int> errors{0};
-} stats;
 
 // Globals
 // std::unordered_map<int, ClientInfo> clients;
@@ -75,11 +74,18 @@ int make_socket_non_block(int fd) {
 void remove_client_locked(int epoll_fd, int client_fd) {
   if (client_fd >= 0 && client_fd < (int)clients.size() && clients[client_fd]) {
 
+    // write stats
+    auto duration = Clock::now() - clients[client_fd]->connect_time;
+    uint64_t ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+    pm.add_connection_sample(ns);
+    logger.log("DISC", client_fd, ns, pm.active_clients.load());
+
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
     close(client_fd);
 
     clients[client_fd].reset();
-    stats.active_clients--;
+    pm.active_clients--;
   }
 }
 
@@ -102,7 +108,7 @@ void process_client_messages(int epoll_fd, ClientInfo &cl) {
     }
 
     if (cl.header.size > MAX_MSG_SIZE) {
-      std::cerr << "Message too large" << cl.fd << std::endl;
+      pm.total_errors++;
       remove_client(epoll_fd, cl.fd);
       return;
     }
@@ -111,10 +117,11 @@ void process_client_messages(int epoll_fd, ClientInfo &cl) {
     if (cl.recived < full_msg_size)
       break;
 
+    pm.total_received++;
     // send back
     send(cl.fd, cl.buff, full_msg_size, 0);
-    stats.total_received++;
-    stats.total_sent++;
+
+    pm.total_sent++;
 
     size_t remaining = cl.recived - full_msg_size;
     if (remaining > 0) {
@@ -123,18 +130,24 @@ void process_client_messages(int epoll_fd, ClientInfo &cl) {
     cl.recived = remaining;
     cl.header_recived = false;
 
-    count += 1;
+    count++;
   }
 }
 
 void handle_client_data(int epoll_fd, int fd, TimePoint now) {
-  std::lock_guard<std::mutex> lock(clients_mutex);
+  auto start_proc = Clock::now();
 
-  if (fd >= (int)clients.size() || !clients[fd])
-    return;
+  ClientInfo *cl_ptr = nullptr;
 
-  ClientInfo &cl = *clients[fd];
-  cl.last_activ = now;
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex);
+    if (fd >= (int)clients.size() || !clients[fd])
+      return;
+    cl_ptr = clients[fd].get();
+    cl_ptr->last_activ = now;
+  }
+
+  ClientInfo &cl = *cl_ptr;
 
   // В режиме EPOLLET нужно читать до EAGAIN
   while (true) {
@@ -143,7 +156,7 @@ void handle_client_data(int epoll_fd, int fd, TimePoint now) {
     if (n < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         break;
-      stats.errors++;
+      pm.total_errors++;
 
       remove_client_locked(epoll_fd, fd);
       return;
@@ -159,13 +172,22 @@ void handle_client_data(int epoll_fd, int fd, TimePoint now) {
     process_client_messages(epoll_fd, cl);
 
     if (cl.recived >= BUF_SIZE) {
-      std::cerr << "Buffer overflow, closing " << fd << std::endl;
+      
+      pm.total_errors++;
 
       remove_client_locked(epoll_fd, fd);
       return;
     }
   }
+  auto end_proc = Clock::now();
+  auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end_proc -
+                                                                 start_proc)
+                .count();
+
+  pm.add_latency_sample(ns);
+  logger.log("MSG", fd, ns, pm.active_clients.load());
 }
+
 void handle_new_conn(int epoll_fd, int listen_sock) {
   int count = 0;
   while (count <= MAX_ITERATION_SERVER_ACCEPT) {
@@ -179,27 +201,27 @@ void handle_new_conn(int epoll_fd, int listen_sock) {
       break;
     }
 
-    if (stats.active_clients >= MAX_CLIENTS) {
+    if (pm.active_clients >= MAX_CLIENTS) {
       close(client_fd);
       continue;
     }
-
+    logger.log("CONN", client_fd, 0, pm.active_clients.load());
     {
       std::lock_guard<std::mutex> lock(clients_mutex);
       if (client_fd >= (int)clients.size()) {
         clients.resize(client_fd + 128);
       }
       clients[client_fd] = std::make_unique<ClientInfo>(client_fd);
-      stats.active_clients++;
+      pm.active_clients++;
     }
 
     make_socket_non_block(client_fd);
     epoll_event ev;
-    ev.events = EPOLLIN || EPOLLET;
+    ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = client_fd;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
 
-    std::cout << "New Client: " << client_fd << std::endl;
+    // std::cout << "New Client: " << client_fd << std::endl;
     count += 1;
   }
 }
@@ -222,17 +244,13 @@ void cleaner_thread(int epoll_fd) {
     }
 
     for (int fd : to_remove) {
-      std::cout << "Timeout: " << fd << std::endl;
+
       remove_client(epoll_fd, fd);
     }
 
-    std::cout << std::format("Stats: Active={}, Sent={}, Recv={}, Errors={} \n",
-                             stats.active_clients.load(),
-                             stats.total_sent.load(),
-                             stats.total_received.load(), stats.errors.load());
+    pm.print_report("SERVER");
   }
 }
-
 int main(int argc, char **argv) {
 
   if (argc < 2) {
@@ -308,6 +326,10 @@ int main(int argc, char **argv) {
         handle_new_conn(epoll_fd, sock);
       } else {
         handle_client_data(epoll_fd, events[i].data.fd, now);
+        auto end_proc = Clock::now();
+        uint64_t diff =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(end_proc - now)
+                .count();
       }
     }
   }

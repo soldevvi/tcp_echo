@@ -73,3 +73,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Metrics
+server_perf.csv
+*cvs
