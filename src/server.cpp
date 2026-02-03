@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
+
 #include "logger.cpp"
 #include "perf_mon.cpp"
 
@@ -232,7 +233,7 @@ void cleaner_thread(int epoll_fd) {
 	while (server_running) {
 		std::this_thread::sleep_for(std::chrono::seconds(1));
 		auto now = Clock::now();
-		std::vector<int> to_remove;
+		
 
 		{
 			std::lock_guard<std::mutex> lock(clients_mutex);
@@ -240,15 +241,12 @@ void cleaner_thread(int epoll_fd) {
 
 				if (clients[i] &&
 					(now - clients[i]->last_activ > std::chrono::seconds(30))) {
-					to_remove.push_back(i);
+					remove_client(epoll_fd, i);
 				}
 			}
 		}
 
-		for (int fd : to_remove) {
-
-			remove_client(epoll_fd, fd);
-		}
+		
 
 		pm.print_report("SERVER");
 	}
@@ -312,7 +310,8 @@ int main(int argc, char **argv) {
 	epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &ev);
 
 	std::thread cleaner(cleaner_thread, epoll_fd);
-	clients.resize(1024);
+	clients.resize(10010);
+    
 
 	std::cout << "Server listening on port " << port << std::endl;
 	epoll_event events[MAX_EVENTS];

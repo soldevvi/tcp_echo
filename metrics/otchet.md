@@ -78,3 +78,13 @@ Latency (Processing/RTT): Avg=16.25 us, Max=6527.35 us
 
 [CLIENT_TEST]
 Latency (Processing/RTT): Avg=4859.51 us, Max=24147.03 us
+
+## resize vector 10010
+
+[SERVER]
+Latency (Processing/RTT): Avg=20.26 us, Max=2938.42 us
+
+[CLIENT_TEST]
+
+Latency (Processing/RTT): Avg=2998.12 us, Max=29100.13 us
+
