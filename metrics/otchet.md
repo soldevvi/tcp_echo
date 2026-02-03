@@ -88,3 +88,10 @@ Latency (Processing/RTT): Avg=20.26 us, Max=2938.42 us
 
 Latency (Processing/RTT): Avg=2998.12 us, Max=29100.13 us
 
+## mutex array  
+
+[SERVER_B]
+Latency (Processing/RTT): Avg=20.52 us, Max=5861.00 us
+
+[CLIENT_TEST]
+Latency (Processing/RTT): Avg=3475.27 us, Max=23598.99 us

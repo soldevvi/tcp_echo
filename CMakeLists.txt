@@ -16,9 +16,10 @@ find_package(Threads REQUIRED)
 # Добавляем исполняемый файл сервера
 add_executable(tcp_server src/server.cpp)
 add_executable(tcp_server_old src/server_prev.cpp)
+add_executable(tcp_server_b src/server.cpp)
 target_link_libraries(tcp_server PRIVATE Threads::Threads)
 target_link_libraries(tcp_server_old PRIVATE Threads::Threads)
-
+target_link_libraries(tcp_server_b PRIVATE Threads::Threads)
 # Добавляем исполняемый файл клиента
 add_executable(tcp_client src/client.cpp)
 target_link_libraries(tcp_client PRIVATE Threads::Threads)
